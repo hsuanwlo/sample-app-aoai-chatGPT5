@@ -238,6 +238,20 @@ async def init_cosmosdb_client():
     return cosmos_conversation_client
 
 
+def _strip_legacy_max_tokens(value):
+    """Remove any lingering max_tokens keys from nested request payloads."""
+
+    if isinstance(value, dict):
+        value.pop("max_tokens", None)
+        for nested in value.values():
+            _strip_legacy_max_tokens(nested)
+    elif isinstance(value, list):
+        for item in value:
+            _strip_legacy_max_tokens(item)
+
+    return value
+
+
 def prepare_model_args(request_body, request_headers):
     request_max_completion_tokens = request_body.get("max_completion_tokens")
     legacy_request_max_tokens = request_body.get("max_tokens")
@@ -264,7 +278,9 @@ def prepare_model_args(request_body, request_headers):
             )
 
 
-    for raw_message in request_headers:
+    request_messages = request_body.get("messages", [])
+
+    for raw_message in request_messages:
         if not raw_message:
             continue
 
@@ -397,10 +413,11 @@ def prepare_model_args(request_body, request_headers):
 
     if model_args.get("extra_body") is None:
         model_args["extra_body"] = {}
-    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai     
+    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
                 model_args["extra_body"]["user_security_context"]= user_security_context.to_dict()
-    model_args.pop("max_tokens", None)
-    model_args_clean.pop("max_tokens", None)
+
+    _strip_legacy_max_tokens(model_args)
+    _strip_legacy_max_tokens(model_args_clean)
     logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
 
     return model_args
