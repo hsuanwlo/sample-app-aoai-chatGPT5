@@ -3,6 +3,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from pydantic import (
+    AliasChoices,
     BaseModel,
     confloat,
     conint,
@@ -106,8 +107,15 @@ class _AzureOpenAISettings(BaseSettings):
     resource: Optional[str] = None
     endpoint: Optional[str] = None
     temperature: float = 0
-    top_p: float = 0
-    max_tokens: int = 1000
+    # top_p: float = 0
+    max_completion_tokens: Optional[int] = Field(
+        default=1000,
+        validation_alias=AliasChoices(
+            "max_completion_tokens",
+            "max_tokens"
+        )
+    )
+    max_output_tokens: Optional[int] = None
     stream: bool = True
     stop_sequence: Optional[List[str]] = None
     seed: Optional[int] = None
@@ -215,7 +223,8 @@ class _SearchCommonSettings(BaseSettings):
     vectorization_dimensions: Optional[int] = None
     role_information: str = Field(
         default="You are an AI assistant that helps people find information.",
-        validation_alias="AZURE_OPENAI_SYSTEM_MESSAGE"
+        validation_alias="AZURE_OPENAI_SYSTEM_MESSAGE",
+        exclude=True,
     )
 
     @field_validator('include_contexts', mode='before')

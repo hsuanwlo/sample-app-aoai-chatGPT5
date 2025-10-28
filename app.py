@@ -239,39 +239,77 @@ async def init_cosmosdb_client():
 
 
 def prepare_model_args(request_body, request_headers):
-    request_messages = request_body.get("messages", [])
+    request_max_completion_tokens = request_body.get("max_completion_tokens")
+    legacy_request_max_tokens = request_body.get("max_tokens")
+
+    if legacy_request_max_tokens is not None:
+        logging.debug(
+            "Translating legacy max_tokens override from chat request into max_completion_tokens."
+        )
+        if request_max_completion_tokens is None:
+            request_max_completion_tokens = legacy_request_max_tokens
+
+    system_message = app_settings.azure_openai.system_message
+    if app_settings.datasource and getattr(app_settings, "search", None):
+        role_information = getattr(app_settings.search, "role_information", None)
+        if role_information:
+            system_message = role_information
     messages = []
-    if not app_settings.datasource:
-        messages = [
+    if system_message:
+        messages.append(
             {
                 "role": "system",
-                "content": app_settings.azure_openai.system_message
+                "content": system_message
             }
-        ]
+            )
 
-    for message in request_messages:
-        if message:
-            match message["role"]:
-                case "user":
-                    messages.append(
-                        {
-                            "role": message["role"],
-                            "content": message["content"]
-                        }
-                    )
-                case "assistant" | "function" | "tool":
-                    messages_helper = {}
-                    messages_helper["role"] = message["role"]
-                    if "name" in message:
-                        messages_helper["name"] = message["name"]
-                    if "function_call" in message:
-                        messages_helper["function_call"] = message["function_call"]
-                    messages_helper["content"] = message["content"]
-                    if "context" in message:
-                        context_obj = json.loads(message["context"])
-                        messages_helper["context"] = context_obj
-                    
-                    messages.append(messages_helper)
+
+    for raw_message in request_headers:
+        if not raw_message:
+            continue
+
+        message = raw_message
+        if isinstance(raw_message, (list, tuple)) and not isinstance(raw_message, str):
+            try:
+                message = dict(raw_message)
+            except (TypeError, ValueError):
+                logging.warning(
+                    "Skipping chat message with unsupported sequence format when preparing model args: %r",
+                    raw_message,
+                )
+                continue
+
+        if not isinstance(message, dict):
+            logging.warning(
+                "Skipping chat message with unsupported type when preparing model args: %r",
+                raw_message,
+            )
+            continue
+
+        role = message.get("role")
+        if role == "user":
+            messages.append(
+                {
+                    "role": role,
+                    "content": message.get("content"),
+                }
+            )
+            continue
+
+        if role in {"assistant", "function", "tool"}:
+            messages_helper = {"role": role}
+            if "name" in message:
+                messages_helper["name"] = message["name"]
+            if "function_call" in message:
+                messages_helper["function_call"] = message["function_call"]
+            messages_helper["content"] = message.get("content")
+            if "context" in message:
+                context_value = message["context"]
+                if isinstance(context_value, str):
+                    context_value = json.loads(context_value)
+                messages_helper["context"] = context_value
+
+            messages.append(messages_helper)
 
 
     user_security_context = None
@@ -284,12 +322,30 @@ def prepare_model_args(request_body, request_headers):
     model_args = {
         "messages": messages,
         "temperature": app_settings.azure_openai.temperature,
-        "max_tokens": app_settings.azure_openai.max_tokens,
-        "top_p": app_settings.azure_openai.top_p,
+        # "max_tokens": app_settings.azure_openai.max_tokens,
+        # "top_p": app_settings.azure_openai.top_p,
         "stop": app_settings.azure_openai.stop_sequence,
         "stream": app_settings.azure_openai.stream,
         "model": app_settings.azure_openai.model
     }
+
+    if not app_settings.datasource:
+        max_completion_tokens = (
+            request_max_completion_tokens
+            if request_max_completion_tokens is not None
+            else app_settings.azure_openai.max_completion_tokens
+        )
+        if max_completion_tokens is not None:
+            model_args["max_completion_tokens"] = max_completion_tokens
+    else:
+        if request_max_completion_tokens is not None:
+            logging.debug(
+                "Ignoring max_completion_tokens override while a data source is configured to avoid Model Router validation errors."
+            )
+        logging.debug(
+            "Skipping max_completion_tokens for data source requests due to known Model Router validation issues."
+        )
+
 
     if len(messages) > 0:
         if messages[-1]["role"] == "user":
@@ -343,6 +399,8 @@ def prepare_model_args(request_body, request_headers):
         model_args["extra_body"] = {}
     if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai     
                 model_args["extra_body"]["user_security_context"]= user_security_context.to_dict()
+    model_args.pop("max_tokens", None)
+    model_args_clean.pop("max_tokens", None)
     logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
 
     return model_args
@@ -1050,7 +1108,10 @@ async def generate_title(conversation_messages) -> str:
     try:
         azure_openai_client = await init_openai_client()
         response = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model, messages=messages, temperature=1, max_tokens=64
+            model=app_settings.azure_openai.model,
+            messages=messages,
+            temperature=1,
+            max_completion_tokens=64
         )
 
         title = response.choices[0].message.content
