@@ -75,6 +75,43 @@ def generateFilterString(userToken):
     return f"{AZURE_SEARCH_PERMITTED_GROUPS_COLUMN}/any(g:search.in(g, '{group_ids}'))"
 
 
+def _getattr_or_key(value, attr, default=None):
+    if isinstance(value, dict):
+        return value.get(attr, default)
+
+    return getattr(value, attr, default)
+
+
+def _extract_output_text(content):
+    """Return a user-facing string from Responses-style content blocks."""
+
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_chunks = []
+        for part in content:
+            part_type = _getattr_or_key(part, "type")
+            if part_type not in {"output_text", "text"}:
+                # Ignore tool calls, search plans, etc.
+                continue
+
+            text_value = _getattr_or_key(part, "text") or _getattr_or_key(part, "content")
+            if text_value:
+                text_chunks.append(text_value)
+
+        if text_chunks:
+            return "\n".join(text_chunks)
+
+    try:
+        return json.dumps(content, cls=JSONEncoder)
+    except Exception:  # pragma: no cover - best effort fallback for debug logging
+        return str(content)
+
+
 def format_non_streaming_response(chatCompletion, history_metadata, apim_request_id):
     response_obj = {
         "id": chatCompletion.id,
@@ -99,7 +136,7 @@ def format_non_streaming_response(chatCompletion, history_metadata, apim_request
             response_obj["choices"][0]["messages"].append(
                 {
                     "role": "assistant",
-                    "content": message.content,
+                    "content": _extract_output_text(message.content),
                 }
             )
             return response_obj
@@ -149,9 +186,12 @@ def format_stream_response(chatCompletionChunk, history_metadata, apim_request_i
                 return response_obj
             else:
                 if delta.content:
+                    text_content = _extract_output_text(delta.content)
+                    if not text_content:
+                        return {}
                     messageObj = {
                         "role": "assistant",
-                        "content": delta.content,
+                        "content": text_content,
                     }
                     response_obj["choices"][0]["messages"].append(messageObj)
                     return response_obj
