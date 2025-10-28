@@ -16,7 +16,7 @@ from quart import (
     current_app,
 )
 
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, BadRequestError
 from azure.identity.aio import (
     DefaultAzureCredential,
     get_bearer_token_provider
@@ -238,6 +238,20 @@ async def init_cosmosdb_client():
     return cosmos_conversation_client
 
 
+def _strip_legacy_max_tokens(value):
+    """Remove any lingering max_tokens keys from nested request payloads."""
+
+    if isinstance(value, dict):
+        value.pop("max_tokens", None)
+        for nested in value.values():
+            _strip_legacy_max_tokens(nested)
+    elif isinstance(value, list):
+        for item in value:
+            _strip_legacy_max_tokens(item)
+
+    return value
+
+
 def prepare_model_args(request_body, request_headers):
     request_max_completion_tokens = request_body.get("max_completion_tokens")
     legacy_request_max_tokens = request_body.get("max_tokens")
@@ -264,7 +278,9 @@ def prepare_model_args(request_body, request_headers):
             )
 
 
-    for raw_message in request_headers:
+    request_messages = request_body.get("messages", [])
+
+    for raw_message in request_messages:
         if not raw_message:
             continue
 
@@ -397,10 +413,11 @@ def prepare_model_args(request_body, request_headers):
 
     if model_args.get("extra_body") is None:
         model_args["extra_body"] = {}
-    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai     
+    if user_security_context:  # security component introduced here https://learn.microsoft.com/en-us/azure/defender-for-cloud/gain-end-user-context-ai
                 model_args["extra_body"]["user_security_context"]= user_security_context.to_dict()
-    model_args.pop("max_tokens", None)
-    model_args_clean.pop("max_tokens", None)
+
+    _strip_legacy_max_tokens(model_args)
+    _strip_legacy_max_tokens(model_args_clean)
     logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
 
     return model_args
@@ -485,15 +502,35 @@ async def send_chat_request(request_body, request_headers):
             
     request_body['messages'] = filtered_messages
     model_args = prepare_model_args(request_body, request_headers)
+    # Make a deep copy so we can safely mutate on retries without affecting
+    # the original payload that may be reused when chaining tool calls.
+    model_args_retry = copy.deepcopy(model_args)
 
     try:
         azure_openai_client = await init_openai_client()
-        raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
-        response = raw_response.parse()
-        apim_request_id = raw_response.headers.get("apim-request-id") 
+        raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args_retry)
+    except BadRequestError as e:
+        error_message = str(e)
+        if "Unsupported parameter: 'max_tokens'" in error_message:
+            logging.warning(
+                "Azure OpenAI rejected max token settings; retrying request without explicit limits."
+            )
+            model_args_retry.pop("max_tokens", None)
+            model_args_retry.pop("max_completion_tokens", None)
+            extra_body = model_args_retry.get("extra_body")
+            if extra_body:
+                _strip_legacy_max_tokens(extra_body)
+
+            raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args_retry)
+        else:
+            logging.exception("Exception in send_chat_request")
+            raise e
     except Exception as e:
         logging.exception("Exception in send_chat_request")
         raise e
+
+    response = raw_response.parse()
+    apim_request_id = raw_response.headers.get("apim-request-id")
 
     return response, apim_request_id
 
@@ -1107,12 +1144,25 @@ async def generate_title(conversation_messages) -> str:
 
     try:
         azure_openai_client = await init_openai_client()
-        response = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model,
-            messages=messages,
-            temperature=1,
-            max_completion_tokens=64
-        )
+        try:
+            response = await azure_openai_client.chat.completions.create(
+                model=app_settings.azure_openai.model,
+                messages=messages,
+                temperature=1,
+                max_completion_tokens=64
+            )
+        except BadRequestError as e:
+            if "Unsupported parameter: 'max_tokens'" in str(e):
+                logging.warning(
+                    "Azure OpenAI rejected title generation max token override; retrying without explicit limit."
+                )
+                response = await azure_openai_client.chat.completions.create(
+                    model=app_settings.azure_openai.model,
+                    messages=messages,
+                    temperature=1,
+                )
+            else:
+                raise
 
         title = response.choices[0].message.content
         return title
