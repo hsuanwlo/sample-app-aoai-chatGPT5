@@ -1,6 +1,7 @@
 import { cloneDeep } from 'lodash'
 
 import { AskResponse, Citation } from '../../api'
+import { deriveCitationUrl } from '../../utils/citationUtils'
 
 export type ParsedAnswer = {
   citations: Citation[]
@@ -39,6 +40,10 @@ export function parseAnswer(answer: AskResponse): ParsedAnswer {
       answerText = answerText.replaceAll(link, ` ^${++citationReindex}^ `)
       citation.id = citationIndex // original doc index to de-dupe
       citation.reindex_id = citationReindex.toString() // reindex from 1 for display
+      const derivedUrl = deriveCitationUrl(citation)
+      if (derivedUrl) {
+        citation.url = derivedUrl
+      }
       filteredCitations.push(citation)
     }
   })
