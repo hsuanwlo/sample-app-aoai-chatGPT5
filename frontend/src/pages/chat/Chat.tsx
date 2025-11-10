@@ -38,6 +38,7 @@ import { QuestionInput } from "../../components/QuestionInput";
 import { ChatHistoryPanel } from "../../components/ChatHistory/ChatHistoryPanel";
 import { AppStateContext } from "../../state/AppProvider";
 import { useBoolean } from "@fluentui/react-hooks";
+import { deriveCitationUrl } from "../../utils/citationUtils";
 
 const enum messageStatus {
   NotRunning = 'Not Running',
@@ -720,7 +721,13 @@ const Chat = () => {
     if (message?.role && message?.role === 'tool' && typeof message?.content === "string") {
       try {
         const toolMessage = JSON.parse(message.content) as ToolMessageContent
-        return toolMessage.citations
+        return toolMessage.citations?.map(citation => {
+          const derivedUrl = deriveCitationUrl(citation)
+          if (derivedUrl) {
+            return { ...citation, url: derivedUrl }
+          }
+          return citation
+        }) ?? []
       } catch {
         return []
       }

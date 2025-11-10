@@ -13,6 +13,7 @@ import { XSSAllowTags, XSSAllowAttributes } from '../../constants/sanatizeAllowa
 import { AppStateContext } from '../../state/AppProvider'
 
 import { parseAnswer } from './AnswerParser'
+import { buildCitationDisplayText, deriveCitationUrl } from '../../utils/citationUtils'
 
 import styles from './Answer.module.css'
 
@@ -67,22 +68,18 @@ export const Answer = ({ answer, onCitationClicked, onExectResultClicked }: Prop
   }, [appStateContext?.state.feedbackState, feedbackState, answer.message_id])
 
   const createCitationFilepath = (citation: Citation, index: number, truncate: boolean = false) => {
-    let citationFilename = ''
+    const part_i = citation.part_index ?? (citation.chunk_id ? parseInt(citation.chunk_id) + 1 : index)
+    const derivedUrl = deriveCitationUrl(citation)
 
-    if (citation.filepath) {
-      const part_i = citation.part_index ?? (citation.chunk_id ? parseInt(citation.chunk_id) + 1 : '')
-      if (truncate && citation.filepath.length > filePathTruncationLimit) {
-        const citationLength = citation.filepath.length
-        citationFilename = `${citation.filepath.substring(0, 20)}...${citation.filepath.substring(citationLength - 20)} - Part ${part_i}`
-      } else {
-        citationFilename = `${citation.filepath} - Part ${part_i}`
-      }
-    } else if (citation.filepath && citation.reindex_id) {
-      citationFilename = `${citation.filepath} - Part ${citation.reindex_id}`
-    } else {
-      citationFilename = `Citation ${index}`
+    if (derivedUrl) {
+      return derivedUrl
     }
-    return citationFilename
+
+    if (citation.filepath && citation.reindex_id && !citation.part_index) {
+      return `${citation.filepath} - Part ${citation.reindex_id}`
+    }
+
+    return buildCitationDisplayText(citation, part_i, filePathTruncationLimit, truncate)
   }
 
   const onLikeResponseClicked = async () => {
